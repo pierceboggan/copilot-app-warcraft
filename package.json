@@ -1,0 +1,13 @@
+{
+	"name": "copilot-mission-table",
+	"version": "1.0.0",
+	"private": true,
+	"description": "Watch and steer GitHub Copilot app sessions from World of Warcraft.",
+	"type": "module",
+	"engines": { "node": ">=22" },
+	"scripts": {
+		"start": "node companion/companion.mjs",
+		"install-addon": "node companion/companion.mjs install",
+		"status": "node companion/companion.mjs status"
+	}
+}

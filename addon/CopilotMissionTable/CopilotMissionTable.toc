@@ -1,0 +1,11 @@
+## Interface: 120001, 110207, 50501, 11508
+## Title: |cff7ee787Copilot|r Mission Table
+## Notes: Watch and steer your GitHub Copilot sessions from Azeroth.
+## Author: pierceboggan
+## Version: 1.0.0
+## SavedVariables: CopilotMissionTableDB
+## IconTexture: Interface\Icons\INV_Misc_Spyglass_03
+
+Inbox.lua
+Core.lua
+UI.lua
