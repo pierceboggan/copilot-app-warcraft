@@ -1,32 +1,36 @@
 # Copilot Mission Table
 
-Watch and steer your GitHub Copilot app sessions from inside World of Warcraft.
+Command your GitHub Copilot app sessions from a garrison table inside World of Warcraft.
 
-Your sessions show up as followers on missions. A busy session casts "Thinking..." on a loop. A session that needs you gets a quest-giver "!" and a raid warning, and its `ask_user` choices appear as gossip options. Context use shows as a mana bar. You send orders by courier, and Hearth (`/reload`) dispatches them.
+Every session joins your roster as a follower out on a mission. A busy one casts "Thinking..." on loop until the cast bar fills. When a session needs you, a yellow "!" floats over its head and a raid warning hits your screen, and its `ask_user` choices show up as gossip options you can click like any innkeeper's dialogue. Context use drains a blue mana bar. You write orders, hand them to a courier, and Hearth home (`/reload`) to send him running.
 
-## How it works
+![The Raid tab: four CI bosses engaged, each with a health bar for failing checks and an Engage button](docs/images/raid.png)
 
-WoW addons can't touch the network or read files while the game runs. A small companion process on your Mac bridges the gap:
+## How the courier gets there
+
+Blizzard keeps addons in a sealed room with no network and no file access while the game runs. So a small companion process on your Mac carries messages through the wall:
 
 ```
 Copilot app --ws (observer)--> companion --writes--> AddOns/CopilotMissionTable/Inbox.lua --/reload--> addon
 addon --/reload--> WTF/.../SavedVariables/CopilotMissionTable.lua --watched--> companion --send_message--> Copilot app
 ```
 
-On every `/reload`, WoW saves your queued orders and reloads the latest reports. The companion delivers each order within a second or two, and the next Hearth confirms it. Everything stays inside Blizzard's addon rules: no input automation and no memory reading.
+Each `/reload` makes WoW save your queued orders to disk and pull in the latest scouting report. Within a second or two the companion picks up your orders and delivers them, and your next Hearth confirms they landed. It all stays inside Blizzard's addon rules. Nothing automates input, and nothing reads game memory.
 
-## Setup
+## Attunement
 
-Requires Node 22+ and the GitHub Copilot app running.
+You need Node 22+ and the GitHub Copilot app running.
 
 ```sh
 node companion/companion.mjs install --wow "/Applications/World of Warcraft"   # once; remembers the path
 node companion/companion.mjs                                                   # leave running while you play
 ```
 
-Add `--flavor _classic_` or `--flavor _classic_era_` for Classic clients. Restart WoW once after installing so it discovers the addon.
+Retail is the default. For Classic, add `--flavor _classic_` or `--flavor _classic_era_` to the install line. WoW Forever lives in the `_forever_` folder and wants `--flavor _forever_`. Restart WoW once after installing so the addon list picks up the new arrival.
 
-## In game
+On Forever (client 1.60.1, where this addon was field tested) the AddOns screen marks Mission Table as Incompatible, since the TOC doesn't list Interface 16001 yet. Tick "Load out of date AddOns" and it loads fine.
+
+## Your spellbook
 
 | | |
 |---|---|
@@ -43,17 +47,25 @@ Add `--flavor _classic_` or `--flavor _classic_era_` for Classic clients. Restar
 | `/cmt log` | Combat log: your missions' tool calls as spells ("Detect Magic hits \"TODO\" for 812") |
 | `/cmt sound`, `/cmt announce` | Toggle alerts |
 
-Loot and bosses come from `gh api graphql` every 3 minutes, so the companion needs `gh` signed in.
+Loot drops and boss spawns come from `gh api graphql` every 3 minutes, so sign in to `gh` before you pull.
 
-## Limitations
+Merge a big enough PR and it drops as a Legendary ring, Bind on Merge, with the review comment as flavor text.
 
-- Updates arrive on `/reload`. Live in-game updates aren't possible without breaking WoW's sandbox.
-- Permission prompts must be answered in the app; the addon flags them.
-- Questions asked while the companion wasn't running aren't recoverable, because the app doesn't persist them.
-- After you steer from WoW, the app routes that session's UI tool actions (opening canvases, for example) to the companion until you next send from the app window.
-- The companion uses the app's local WebSocket (`~/.copilot/run/ws.*`), which is an internal protocol and may change between app versions.
+![The Loot tab: bags full of merged PRs, with a Legendary ring tooltip for a 7,000-line change](docs/images/loot.png)
 
-## Development
+The Achievements tab tracks the long grind. Leeroy Jenkins goes to anyone who sends priority orders. Night Owl wants a courier dispatched between midnight and 5 AM.
+
+![The Achievements tab at 80 of 300 points, with Pony Express, Loot Goblin, Legendary!, Hoarder, and Purple Haze earned](docs/images/achievements.png)
+
+## Known debuffs
+
+- Updates arrive on `/reload`. Live in-game updates would mean breaking out of WoW's sandbox, which isn't possible.
+- Permission prompts have to be answered in the app. The addon flags them so you know to alt-tab.
+- If the companion was offline when a session asked a question, that question is gone for good, because the app doesn't persist them.
+- After you steer a session from WoW, the app routes that session's UI tool actions (opening canvases, for example) to the companion. That lasts until you next send from the app window.
+- The companion talks to the app over its local WebSocket (`~/.copilot/run/ws.*`). That's an internal protocol, and an app update can change it.
+
+## For tinkerers
 
 ```sh
 node companion/companion.mjs status        # print what the addon would see
