@@ -97,13 +97,22 @@ function ns.PendingOrders(sessionId)
 end
 
 local orderCounter = 0
+-- Orders created since this reload haven't reached the companion yet, so they can still change.
+local draftOrders = {}
 local function addOrder(order)
 	orderCounter = orderCounter + 1
 	order.id = string.format("%d-%d-%d", time(), math.random(100000, 999999), orderCounter)
 	order.createdAt = time()
+	draftOrders[order.id] = true
 	table.insert(ns.db.outbox, order)
 	ns.PlaySound("IG_QUEST_LIST_SELECT")
 	if ns.Refresh then ns.Refresh() end
+end
+
+-- Edit boxes and chat escape a typed "|" as "||"; undo that for anything the player typed.
+local function typed(text)
+	text = text and strtrim(text) or ""
+	return (text:gsub("||", "|"))
 end
 
 function ns.Stat(name, amount)
@@ -111,7 +120,7 @@ function ns.Stat(name, amount)
 end
 
 function ns.QueueMessage(sessionId, text, mode)
-	text = text and strtrim(text) or ""
+	text = typed(text)
 	if text == "" then return false end
 	local s = ns.FindSession(sessionId)
 	addOrder({ sessionId = sessionId, kind = "message", text = text, mode = mode or "enqueue" })
@@ -125,11 +134,16 @@ function ns.QueueMessage(sessionId, text, mode)
 	return true
 end
 
-function ns.Answer(sessionId, requestId, text)
-	text = text and strtrim(text) or ""
-	if text == "" then return false end
+-- `isChoice` marks an exact raw choice from the question, which must not be altered.
+function ns.Answer(sessionId, requestId, text, isChoice)
+	if not isChoice then text = typed(text) end
+	if not text or text == "" then return false end
 	for _, order in ipairs(ns.db.outbox) do
 		if order.kind == "answer" and order.requestId == requestId then
+			if not draftOrders[order.id] then
+				ns.Print("Your answer is already riding out. It can't be changed now.")
+				return false
+			end
 			order.text = text
 			ns.Print("Answer updated. Hearth (/reload) to dispatch.")
 			if ns.Refresh then ns.Refresh() end
@@ -324,7 +338,11 @@ SlashCmdList.COPILOTMISSIONTABLE = function(input)
 			end
 			local choice = tonumber(answer)
 			local raw = s.question.rawChoices or s.question.choices or {}
-			ns.Answer(s.id, s.question.requestId, choice and raw[choice] or answer)
+			if choice and raw[choice] then
+				ns.Answer(s.id, s.question.requestId, raw[choice], true)
+			else
+				ns.Answer(s.id, s.question.requestId, answer)
+			end
 			return
 		end
 		local index, bang, text = input:match("^(%d+)(!?)%s+(.+)$")

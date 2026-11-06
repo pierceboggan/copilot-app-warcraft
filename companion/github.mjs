@@ -76,7 +76,10 @@ export async function fetchGithub(state) {
 	const stillOpen = new Set();
 	for (const pr of viewer.open.nodes) {
 		stillOpen.add(pr.id);
-		const contexts = pr.commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? [];
+		const rollup = pr.commits.nodes[0]?.commit.statusCheckRollup;
+		// No rollup yet (fresh push, no CI): unknown, so neither a boss nor a kill.
+		if (!rollup) continue;
+		const contexts = rollup.contexts.nodes ?? [];
 		let pass = 0;
 		let pending = 0;
 		const failing = [];
@@ -86,6 +89,9 @@ export async function fetchGithub(state) {
 			else if (outcome === "pending") pending++;
 			else failing.push(sanitizeForWow(ctx.name ?? ctx.context ?? "check", 50));
 		}
+		// The aggregate covers checks beyond the first page of contexts.
+		const aggregateFailing = rollup.state === "FAILURE" || rollup.state === "ERROR";
+		if (aggregateFailing && failing.length === 0) failing.push("(more checks)");
 		const name = `${sanitizeForWow(pr.title, 60)}, ${EPITHETS[hash(pr.id) % EPITHETS.length]}`;
 		if (failing.length > 0) {
 			state.bossesSeenFailing[pr.id] = { name, number: pr.number, repo: pr.repository.nameWithOwner };
@@ -101,7 +107,7 @@ export async function fetchGithub(state) {
 				failing,
 				draft: pr.isDraft || undefined,
 			});
-		} else if (state.bossesSeenFailing[pr.id] && pending === 0) {
+		} else if (state.bossesSeenFailing[pr.id] && rollup.state === "SUCCESS") {
 			defeat(state, pr.id);
 		}
 	}

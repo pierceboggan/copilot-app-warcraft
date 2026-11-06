@@ -70,26 +70,30 @@ class Parser {
 		}
 		throw new Error(`Unexpected "${ch}" at ${this.i}`);
 	}
+	// Lua strings are byte strings: collect bytes, then decode UTF-8 once.
 	string() {
 		const quote = this.peek();
 		this.i++;
-		let out = "";
+		const bytes = [];
+		const pushText = (text) => {
+			for (const b of Buffer.from(text, "utf8")) bytes.push(b);
+		};
 		while (!this.done()) {
 			const ch = this.src[this.i++];
-			if (ch === quote) return out;
+			if (ch === quote) return Buffer.from(bytes).toString("utf8");
 			if (ch !== "\\") {
-				out += ch;
+				pushText(ch);
 				continue;
 			}
 			const esc = this.src[this.i++];
-			const simple = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", f: "\f", v: "\v" };
-			if (esc in simple) out += simple[esc];
-			else if (esc === "\n") out += "\n";
+			const simple = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11 };
+			if (esc in simple) bytes.push(simple[esc]);
+			else if (esc === "\n") bytes.push(10);
 			else if (/\d/.test(esc)) {
 				let digits = esc;
 				while (digits.length < 3 && /\d/.test(this.peek())) digits += this.src[this.i++];
-				out += String.fromCharCode(Number(digits));
-			} else out += esc;
+				bytes.push(Number(digits) & 0xff);
+			} else pushText(esc);
 		}
 		throw new Error("Unterminated string");
 	}
@@ -185,12 +189,14 @@ function luaString(s) {
 	let out = '"';
 	for (const ch of s) {
 		const code = ch.codePointAt(0);
+		// Always three digits: "\9" followed by "10" would otherwise read as "\910".
+		const byteEscape = (b) => `\\${String(b).padStart(3, "0")}`;
 		if (ch === '"') out += '\\"';
 		else if (ch === "\\") out += "\\\\";
 		else if (ch === "\n") out += "\\n";
-		else if (code < 32) out += `\\${code}`;
+		else if (code < 32 || code === 127) out += byteEscape(code);
 		else if (code < 128) out += ch;
-		else for (const byte of Buffer.from(ch, "utf8")) out += `\\${byte}`;
+		else for (const byte of Buffer.from(ch, "utf8")) out += byteEscape(byte);
 	}
 	return `${out}"`;
 }

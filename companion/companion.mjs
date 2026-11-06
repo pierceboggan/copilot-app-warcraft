@@ -3,7 +3,6 @@
 //   app -> WoW:  writes Interface/AddOns/CopilotMissionTable/Inbox.lua (picked up on /reload)
 //   WoW -> app:  reads WTF/Account/*/SavedVariables/CopilotMissionTable.lua (written on /reload)
 
-import { randomUUID } from "node:crypto";
 import {
 	cpSync,
 	existsSync,
@@ -14,6 +13,7 @@ import {
 	readSync,
 	closeSync,
 	renameSync,
+	rmSync,
 	statSync,
 	unwatchFile,
 	watchFile,
@@ -141,8 +141,11 @@ const aliases = new Map();
 let commander;
 let connected = false;
 let dirty = true;
+// `status` runs beside a live companion, so it must never write the shared ledger.
+const readOnly = command === "status";
 
 const persistState = () => {
+	if (readOnly) return;
 	const sentIds = Object.keys(state.sent);
 	if (sentIds.length > 500) {
 		for (const id of sentIds.slice(0, sentIds.length - 500)) delete state.sent[id];
@@ -173,6 +176,7 @@ function upsertWorkspace(w) {
 	s.name = w.name || w.session?.title || "Unnamed mission";
 	s.project = w.projectName || "";
 	s.branch = w.branch || "";
+	s.repo = w.checkoutBindings?.[0]?.repoFullName || "";
 	s.updatedAt = Date.parse(w.updatedAt || w.session?.updatedAt || "") || s.updatedAt || 0;
 	s.archived = Boolean(w.archivedAt);
 	s.model = w.session?.model ?? s.model;
@@ -187,6 +191,12 @@ function upsertWorkspace(w) {
 // The live stream starts empty, so recover recent status and the last report from disk.
 function seedFromDisk(s) {
 	s.seeded = true;
+	const pending = state.questions[s.id];
+	if (pending) {
+		s.question = pending;
+		s.status = "input";
+		dirty = true;
+	}
 	const file = join(COPILOT_HOME, "session-state", s.id, "events.jsonl");
 	let text;
 	let mtime;
@@ -230,19 +240,27 @@ function seedFromDisk(s) {
 			lastMarkerAt = Date.parse(ev.timestamp) || lastMarkerAt;
 		}
 	}
-	const recentlyActive = Date.now() - mtime < 20_000;
+	// Only an open turn suggests work in flight. It's a guess until a live event confirms it.
 	const midTurn = lastMarker === "user.message" || lastMarker === "assistant.turn_start";
-	if (recentlyActive || (midTurn && Date.now() - mtime < 5 * 60_000)) {
+	if (midTurn && Date.now() - mtime < 5 * 60_000 && !s.question) {
 		s.status = "busy";
 		s.busySince = lastMarkerAt || mtime;
-	}
-	const pending = state.questions[s.id];
-	if (pending) {
-		s.question = pending;
-		s.status = "input";
+		s.guessedAt = Date.now();
 	}
 	dirty = true;
 }
+
+// Startup guesses that no live event has confirmed fall back to idle.
+function expireGuesses() {
+	for (const s of sessions.values()) {
+		if (s.guessedAt && Date.now() - s.guessedAt > 120_000) {
+			s.guessedAt = undefined;
+			if (s.status === "busy") setStatus(s, "idle");
+		}
+	}
+}
+
+const needsYou = (s) => Boolean(s.question || s.permissionPending);
 
 function setStatus(s, status) {
 	if (s.status === status) return;
@@ -256,6 +274,7 @@ function onSessionEvent(sessionId, ev) {
 	const s = sessions.get(canonicalId(sessionId));
 	if (!s) return;
 	s.updatedAt = Date.now();
+	s.guessedAt = undefined;
 	if (combat.onEvent(s, ev)) dirty = true;
 	if (ev.type === "tool.execution_complete") {
 		state.stats.toolCalls++;
@@ -266,9 +285,10 @@ function onSessionEvent(sessionId, ev) {
 		case "user.message":
 		case "assistant.turn_start":
 		case "tool.execution_start":
-			if (!s.question) setStatus(s, "busy");
+			if (!needsYou(s)) setStatus(s, "busy");
 			break;
 		case "session.idle":
+			s.permissionPending = false;
 			if (!s.question) setStatus(s, "idle");
 			break;
 		case "abort":
@@ -300,7 +320,7 @@ function onSessionEvent(sessionId, ev) {
 			break;
 		case "permission.completed":
 			s.permissionPending = false;
-			if (!s.question) setStatus(s, "busy");
+			if (!needsYou(s)) setStatus(s, "busy");
 			break;
 	}
 }
@@ -413,17 +433,24 @@ function setConnected(value) {
 
 // ---------- steering ----------
 
+const CONNECT_TIMEOUT_MS = 5000;
+
+// Outcomes: "delivered" (confirmed), "sent" (written, unconfirmed), "rejected" (app said no),
+// "unreachable" (never written; safe to retry later).
 function sendToApp(order) {
-	return new Promise((resolveSend) => {
+	return new Promise((done) => {
 		const endpoint = appEndpoint();
 		if (!endpoint) {
-			resolveSend({ ok: false, error: "Copilot app isn't running" });
+			done({ status: "unreachable", error: "Copilot app isn't running" });
 			return;
 		}
 		const sessionId = canonicalId(order.sessionId);
+		const isAnswer = order.kind === "answer";
+		const requestId = isAnswer ? order.requestId : `wow-${order.id}`;
 		const ws = new WebSocket(socketUrl(endpoint, false));
-		const requestId = `wow-${randomUUID()}`;
+		let written = false;
 		let settled = false;
+		let timer;
 		const finish = (result) => {
 			if (settled) return;
 			settled = true;
@@ -431,39 +458,47 @@ function sendToApp(order) {
 			try {
 				ws.close();
 			} catch {}
-			resolveSend(result);
+			done(result);
 		};
-		// No explicit ack exists for send_message; the echoed user.message is the receipt.
-		const timer = setTimeout(() => finish({ ok: true, unconfirmed: true }), SEND_TIMEOUT_MS);
+		timer = setTimeout(
+			() => finish({ status: "unreachable", error: "Timed out connecting to the Copilot app" }),
+			CONNECT_TIMEOUT_MS,
+		);
 		ws.onopen = () => {
-			if (order.kind === "answer") {
-				const s = sessions.get(sessionId);
-				const q = s?.question;
-				ws.send(
-					JSON.stringify({
-						type: "respond_to_user_input",
-						session_id: sessionId,
-						request_id: order.requestId,
-						answer: order.text,
-						was_freeform: !(q?.choices ?? []).includes(order.text),
-						question_id: q?.questionId,
-						question: q?.text,
-						choices: q?.choices,
-						allow_freeform: q?.freeform,
-					}),
-				);
-				setTimeout(() => finish({ ok: true }), 1500);
+			clearTimeout(timer);
+			let payload;
+			if (isAnswer) {
+				const q = sessions.get(sessionId)?.question;
+				const sameQuestion = q?.requestId === order.requestId;
+				payload = {
+					type: "respond_to_user_input",
+					session_id: sessionId,
+					request_id: order.requestId,
+					answer: order.text,
+					was_freeform: !(sameQuestion ? q.choices : []).includes(order.text),
+					question_id: sameQuestion ? q.questionId : undefined,
+					question: sameQuestion ? q.text : undefined,
+					choices: sameQuestion ? q.choices : undefined,
+					allow_freeform: sameQuestion ? q.freeform : undefined,
+				};
 			} else {
-				ws.send(
-					JSON.stringify({
-						type: "send_message",
-						session_id: sessionId,
-						prompt: order.text,
-						delivery_mode: order.mode === "immediate" ? "immediate" : "enqueue",
-						request_id: requestId,
-					}),
-				);
+				payload = {
+					type: "send_message",
+					session_id: sessionId,
+					prompt: order.text,
+					delivery_mode: order.mode === "immediate" ? "immediate" : "enqueue",
+					request_id: requestId,
+				};
 			}
+			try {
+				ws.send(JSON.stringify(payload));
+				written = true;
+			} catch (error) {
+				finish({ status: "unreachable", error: String(error) });
+				return;
+			}
+			// No explicit ack exists for send_message; an echo or resolution is the receipt.
+			timer = setTimeout(() => finish({ status: "sent" }), SEND_TIMEOUT_MS);
 		};
 		ws.onmessage = (event) => {
 			let msg;
@@ -472,23 +507,48 @@ function sendToApp(order) {
 			} catch {
 				return;
 			}
-			if (msg.type === "error" && (!msg.request_id || msg.request_id === requestId)) {
-				finish({ ok: false, error: msg.message || msg.error || "The app rejected the order" });
+			const mine =
+				msg.request_id === requestId ||
+				(!msg.request_id && msg.session_id && canonicalId(msg.session_id) === sessionId);
+			if (msg.type === "error" && written && mine) {
+				finish({ status: "rejected", error: msg.message || "The app rejected the order" });
+				return;
 			}
 			if (
+				!isAnswer &&
 				msg.type === "session_event" &&
 				canonicalId(msg.session_id) === sessionId &&
 				msg.event?.type === "user.message" &&
 				msg.event.data?.content?.includes(order.text.slice(0, 40))
 			) {
-				finish({ ok: true });
+				finish({ status: "delivered" });
+			}
+			if (
+				isAnswer &&
+				msg.type === "user_input_resolved" &&
+				canonicalId(msg.session_id) === sessionId &&
+				msg.request_id === order.requestId
+			) {
+				finish({ status: "delivered" });
 			}
 		};
-		ws.onerror = () => finish({ ok: false, error: "Couldn't reach the Copilot app" });
+		const dropped = () =>
+			finish(written ? { status: "sent" } : { status: "unreachable", error: "Couldn't reach the Copilot app" });
+		ws.onerror = dropped;
+		ws.onclose = dropped;
 	});
 }
 
-async function processOutbox(file) {
+// One pass at a time, so overlapping file events can't dispatch an order twice.
+let outboxChain = Promise.resolve();
+const lastOutboxFile = new Set();
+function processOutbox(file) {
+	lastOutboxFile.add(file);
+	outboxChain = outboxChain.then(() => processOutboxOnce(file)).catch((error) => log(`Outbox error: ${error.message}`));
+	return outboxChain;
+}
+
+async function processOutboxOnce(file) {
 	let db;
 	try {
 		db = parseSavedVariables(readFileSync(file, "utf8")).CopilotMissionTableDB;
@@ -499,22 +559,34 @@ async function processOutbox(file) {
 	const outbox = Array.isArray(db?.outbox) ? db.outbox : [];
 	for (const order of outbox) {
 		if (!order?.id || state.sent[order.id] || typeof order.text !== "string" || !order.sessionId) continue;
-		// WoW edit boxes escape a typed "|" as "||".
-		order.text = order.text.replace(/\|\|/g, "|");
 		const target = sessions.get(canonicalId(order.sessionId));
 		log(`Courier dispatched to "${target?.name ?? order.sessionId}": ${order.text.slice(0, 80)}`);
 		const result = await sendToApp(order);
-		state.sent[order.id] = { at: Date.now(), ok: result.ok, error: result.error };
+		if (result.status === "unreachable") {
+			// Not written anywhere: leave it unrecorded so the retry loop sends it later.
+			log(`  held: ${result.error}`);
+			continue;
+		}
+		const ok = result.status !== "rejected";
+		state.sent[order.id] = { at: Date.now(), ok, status: result.status, error: result.error };
 		persistState();
-		if (result.ok && order.kind === "answer" && target) {
+		if (ok && order.kind === "answer" && target?.question?.requestId === order.requestId) {
 			target.question = undefined;
 			delete state.questions[target.id];
 			persistState();
-			setStatus(target, "busy");
+			if (!needsYou(target)) setStatus(target, "busy");
 		}
-		log(result.ok ? "  delivered" : `  failed: ${result.error}`);
+		log(ok ? `  ${result.status}` : `  rejected: ${result.error}`);
 		dirty = true;
 	}
+}
+
+// Orders held while the app was closed go out once it's reachable again.
+function startOutboxRetry() {
+	setInterval(() => {
+		if (!connected) return;
+		for (const file of lastOutboxFile) processOutbox(file);
+	}, 30_000);
 }
 
 // ---------- WoW files ----------
@@ -559,7 +631,13 @@ function inboxPayload() {
 		else failed[id] = sanitizeForWow(r.error ?? "failed", 120);
 	}
 	const sec = (ms) => (ms ? Math.floor(ms / 1000) : undefined);
-	const byBranch = new Map(live.map((s) => [s.branch, s.id]));
+	// Same branch name in two repos is common ("fix"), so match on both and skip ambiguity.
+	const missionsByRef = new Map();
+	for (const s of live) {
+		const key = `${s.repo.toLowerCase()}#${s.branch}`;
+		missionsByRef.set(key, missionsByRef.has(key) ? null : s.id);
+	}
+	const missionFor = (b) => missionsByRef.get(`${b.repo.toLowerCase()}#${b.branch}`) ?? undefined;
 	return {
 		version: 2,
 		generatedAt: sec(Date.now()),
@@ -569,7 +647,7 @@ function inboxPayload() {
 		failed,
 		stats: { ...state.stats },
 		loot: github.loot,
-		bosses: github.bosses.map((b) => ({ ...b, sessionId: byBranch.get(b.branch) })),
+		bosses: github.bosses.map((b) => ({ ...b, sessionId: missionFor(b) })),
 		defeated: state.defeated ?? [],
 		combat: combat.entries.slice(-80),
 		sessions: list.map((s) => ({
@@ -619,6 +697,22 @@ function printBanner() {
 \x1b[0m`);
 }
 
+const LOCK_FILE = join(STATE_DIR, "companion.pid");
+
+// One companion owns the delivery ledger; a second would double-send.
+function acquireLock() {
+	try {
+		const pid = Number(readFileSync(LOCK_FILE, "utf8"));
+		if (pid && pid !== process.pid) {
+			process.kill(pid, 0);
+			console.error(`Another companion is already running (pid ${pid}).`);
+			process.exit(1);
+		}
+	} catch {}
+	mkdirSync(STATE_DIR, { recursive: true });
+	writeFileSync(LOCK_FILE, String(process.pid));
+}
+
 function startGithubPolling() {
 	const poll = async () => {
 		try {
@@ -649,6 +743,7 @@ function main() {
 		return;
 	}
 	printBanner();
+	acquireLock();
 	if (!existsSync(join(wowRoot, "Interface", "AddOns", ADDON_NAME))) install(wowRoot);
 	log(`WoW: ${wowRoot}`);
 	connectObserver();
@@ -656,6 +751,8 @@ function main() {
 	startGithubPolling();
 	watchSavedVariables(wowRoot);
 	setInterval(() => watchSavedVariables(wowRoot), 10_000);
+	setInterval(expireGuesses, 15_000);
+	startOutboxRetry();
 	setInterval(() => {
 		if (!dirty) return;
 		dirty = false;
@@ -675,6 +772,8 @@ function main() {
 			writeInbox(wowRoot);
 		} catch {}
 		for (const f of watched) unwatchFile(f);
+		persistState();
+		rmSync(LOCK_FILE, { force: true });
 		process.exit(0);
 	};
 	process.on("SIGINT", shutdown);

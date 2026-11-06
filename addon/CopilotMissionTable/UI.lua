@@ -5,6 +5,7 @@ local ROW_HEIGHT = 46
 local VISIBLE_ROWS = 9
 local WIDTH, HEIGHT = 820, 540
 local LIST_WIDTH = 310
+local MAX_CHOICES = 5
 
 local main, beacon
 local rows = {}
@@ -225,7 +226,7 @@ local function buildDetail(parent)
 	detail.questText:SetPoint("RIGHT", -10, 0)
 
 	detail.choices = {}
-	for i = 1, 6 do
+	for i = 1, MAX_CHOICES do
 		local choice = CreateFrame("Button", nil, quest)
 		choice:SetHeight(18)
 		choice:SetPoint("LEFT", 14, 0)
@@ -242,8 +243,8 @@ local function buildDetail(parent)
 		choice:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
 		choice:SetScript("OnClick", function(self)
 			local s = ns.FindSession(selectedId)
-			if s and s.question then
-				ns.Answer(s.id, s.question.requestId, self.raw)
+			if s and s.question and self.raw then
+				ns.Answer(s.id, s.question.requestId, self.raw, true)
 				PlaySound(SOUNDKIT and SOUNDKIT.IG_QUEST_LIST_SELECT or 856)
 			end
 		end)
@@ -336,34 +337,49 @@ local function updateDetail()
 	detail.content:SetHeight(math.max(150, detail.report:GetStringHeight() + 8))
 
 	local q = s.question
-	detail.scroll:SetHeight(q and 90 or 220)
+	detail.scroll:SetHeight(q and 70 or 220)
 	if q then
 		detail.quest:Show()
-		detail.questText:SetText(q.text)
-		local y = -14 - math.max(18, detail.questText:GetStringHeight())
+		local text = q.text
+		for _, order in ipairs(ns.PendingOrders(s.id)) do
+			if order.kind == "answer" and order.requestId == q.requestId then
+				text = text .. "\n|cff7ee787Your answer is sealed: " .. order.text:gsub("|", "||") .. "|r"
+			end
+		end
+		-- Measure the final text, capped so the choices and orders box always fit.
+		detail.questText:SetHeight(0)
+		detail.questText:SetText(text)
+		local textHeight = math.min(math.max(18, detail.questText:GetStringHeight()), 48)
+		detail.questText:SetHeight(textHeight)
+		local y = -14 - textHeight
 		local raw = q.rawChoices or q.choices or {}
+		local labels = q.choices or {}
+		local slots = #labels > MAX_CHOICES and MAX_CHOICES - 1 or MAX_CHOICES
+		local _, index = ns.FindSession(s.id)
 		for i, choice in ipairs(detail.choices) do
-			local label = q.choices and q.choices[i]
-			if label then
+			local label = labels[i]
+			choice:ClearAllPoints()
+			choice:SetPoint("TOPLEFT", 14, y)
+			choice:SetPoint("RIGHT", -10, 0)
+			if label and i <= slots then
 				choice:Show()
-				choice:ClearAllPoints()
-				choice:SetPoint("TOPLEFT", 14, y)
-				choice:SetPoint("RIGHT", -10, 0)
+				choice:Enable()
+				choice.icon:Show()
 				choice.text:SetText(label)
 				choice.raw = raw[i] or label
+				y = y - 20
+			elseif i == slots + 1 and #labels > slots then
+				choice:Show()
+				choice:Disable()
+				choice.icon:Hide()
+				choice.text:SetText(string.format("|cff888888+%d more: /cmt answer %d <number>|r", #labels - slots, index or 0))
+				choice.raw = nil
 				y = y - 20
 			else
 				choice:Hide()
 			end
 		end
 		detail.quest:SetHeight(-y + 8)
-		local pendingAnswer
-		for _, order in ipairs(ns.PendingOrders(s.id)) do
-			if order.kind == "answer" and order.requestId == q.requestId then pendingAnswer = order.text end
-		end
-		if pendingAnswer then
-			detail.questText:SetText(q.text .. "\n|cff7ee787Your answer is sealed: " .. pendingAnswer .. "|r")
-		end
 		detail.placeholder:SetText(q.freeform ~= false and "Write your own answer..." or "Pick a choice above")
 	else
 		detail.quest:Hide()
