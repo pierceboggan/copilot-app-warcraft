@@ -6,6 +6,9 @@ local addonDir = "addon/CopilotMissionTable/"
 
 local now = os.time()
 function time() return now end
+date = os.date
+unpack = table.unpack
+ChatFontNormal = {}
 function strtrim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 function print(...)
 	local parts = {}
@@ -71,6 +74,7 @@ load(inboxPath)
 local ns = {}
 load(addonDir .. "Core.lua", "CopilotMissionTable", ns)
 load(addonDir .. "UI.lua", "CopilotMissionTable", ns)
+load(addonDir .. "Fun.lua", "CopilotMissionTable", ns)
 
 local eventFrame = frames[1]
 eventFrame.scripts.OnEvent(eventFrame, "ADDON_LOADED", "CopilotMissionTable")
@@ -117,6 +121,37 @@ else
 end
 print(("sessions=%d outbox=%d warnings=%d sounds=%d"):format(
 	#ns.Sessions(), #CopilotMissionTableDB.outbox, #warnings, #sounds))
+
+for _, view in ipairs({ "Raid", "Loot", "Achievements", "Missions" }) do
+	ns.SelectView(view)
+	assert(ns.currentView.name == view, "view " .. view .. " should be selected")
+end
+for _, f in ipairs(frames) do
+	if f.scripts.OnEnter then f.scripts.OnEnter(f) end
+	if f.scripts.OnMouseWheel then f.scripts.OnMouseWheel(f, -1) end
+end
+ns.ToggleCombatLog()
+assert(CopilotMissionTableDB.settings.combatLog == true, "combat log should open")
+
+-- Simulate the next reload bringing a legendary drop and a boss kill.
+local before = 0
+for _ in pairs(CopilotMissionTableDB.loot) do before = before + 1 end
+ns.inbox.loot = ns.inbox.loot or {}
+table.insert(ns.inbox.loot, { id = "smoke-legendary", number = 9001, repo = "pierceboggan/test", title = "Rewrite everything", mergedAt = now, additions = 4000, deletions = 9000, files = 120, seed = 3 })
+ns.inbox.defeated = { { id = "smoke-kill", name = "Flaky Test, the Red Build", number = 42, repo = "pierceboggan/test", at = now } }
+ns.FunOnEnter()
+assert(CopilotMissionTableDB.loot["smoke-legendary"], "new loot should land in bags")
+assert(CopilotMissionTableDB.kills["smoke-kill"], "kill should be recorded")
+assert(CopilotMissionTableDB.achievements.legendary and CopilotMissionTableDB.achievements.kill1, "legendary and kill achievements should unlock")
+for _ = 1, 80 do
+	for _, f in ipairs(frames) do
+		if f.scripts.OnUpdate then f.scripts.OnUpdate(f, 0.1) end
+	end
+end
+local earned, total = ns.AchievementPoints()
+print(("loot %d -> %d, achievement points %d/%d"):format(before, before + 1, earned, total))
+CopilotMissionTableDB.loot["smoke-legendary"] = nil
+CopilotMissionTableDB.kills["smoke-kill"] = nil
 SlashCmdList.COPILOTMISSIONTABLE("sync")
 assert(reloaded, "sync should reload")
 

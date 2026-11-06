@@ -22,6 +22,8 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CombatLog } from "./combat.mjs";
+import { fetchGithub } from "./github.mjs";
 import { parseSavedVariables, sanitizeForWow, toLua } from "./lua.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -131,6 +133,9 @@ function socketUrl({ port, token }, observer) {
 const state = loadJson(STATE_FILE, { sent: {}, questions: {} });
 state.sent ??= {};
 state.questions ??= {};
+state.stats ??= { toolCalls: 0, turns: 0, misses: 0 };
+const combat = new CombatLog(state.combat ?? []);
+let github = { loot: [], bosses: [] };
 const sessions = new Map();
 const aliases = new Map();
 let commander;
@@ -142,6 +147,7 @@ const persistState = () => {
 	if (sentIds.length > 500) {
 		for (const id of sentIds.slice(0, sentIds.length - 500)) delete state.sent[id];
 	}
+	state.combat = combat.entries;
 	saveJson(STATE_FILE, state);
 };
 
@@ -250,6 +256,12 @@ function onSessionEvent(sessionId, ev) {
 	const s = sessions.get(canonicalId(sessionId));
 	if (!s) return;
 	s.updatedAt = Date.now();
+	if (combat.onEvent(s, ev)) dirty = true;
+	if (ev.type === "tool.execution_complete") {
+		state.stats.toolCalls++;
+		if (ev.data?.success === false) state.stats.misses++;
+	}
+	if (ev.type === "assistant.turn_end") state.stats.turns++;
 	switch (ev.type) {
 		case "user.message":
 		case "assistant.turn_start":
@@ -547,13 +559,19 @@ function inboxPayload() {
 		else failed[id] = sanitizeForWow(r.error ?? "failed", 120);
 	}
 	const sec = (ms) => (ms ? Math.floor(ms / 1000) : undefined);
+	const byBranch = new Map(live.map((s) => [s.branch, s.id]));
 	return {
-		version: 1,
+		version: 2,
 		generatedAt: sec(Date.now()),
 		connected,
 		commander: commander ?? "Commander",
 		acked,
 		failed,
+		stats: { ...state.stats },
+		loot: github.loot,
+		bosses: github.bosses.map((b) => ({ ...b, sessionId: byBranch.get(b.branch) })),
+		defeated: state.defeated ?? [],
+		combat: combat.entries.slice(-80),
 		sessions: list.map((s) => ({
 			id: s.id,
 			name: sanitizeForWow(s.name, 80),
@@ -601,13 +619,28 @@ function printBanner() {
 \x1b[0m`);
 }
 
+function startGithubPolling() {
+	const poll = async () => {
+		try {
+			github = await fetchGithub(state);
+			persistState();
+			dirty = true;
+		} catch (error) {
+			log(`GitHub scouting failed (is gh signed in?): ${String(error.message).split("\n")[0]}`);
+		}
+	};
+	poll();
+	setInterval(poll, 3 * 60_000);
+	setInterval(persistState, 30_000);
+}
+
 function main() {
 	if (command === "status") {
 		connectObserver();
+		startGithubPolling();
 		setTimeout(() => {
-			console.log(JSON.stringify(inboxPayload(), null, 2));
-			process.exit(0);
-		}, 4000);
+			process.stdout.write(`${JSON.stringify(inboxPayload(), null, 2)}\n`, () => process.exit(0));
+		}, 8000);
 		return;
 	}
 	const wowRoot = resolveWowRoot();
@@ -620,6 +653,7 @@ function main() {
 	log(`WoW: ${wowRoot}`);
 	connectObserver();
 	startWorkspaceRefresh();
+	startGithubPolling();
 	watchSavedVariables(wowRoot);
 	setInterval(() => watchSavedVariables(wowRoot), 10_000);
 	setInterval(() => {

@@ -37,7 +37,13 @@ Add `--flavor _classic_` or `--flavor _classic_era_` for Classic clients. Restar
 | `/cmt 3! stop and summarize` | Priority orders (read at the next turn) |
 | `/cmt answer 3 2` | Answer mission 3's question with choice 2 (or free text) |
 | `/cmt sync` or the Hearth button | `/reload`: dispatch couriers and fetch reports |
+| `/cmt raid` | CI bosses: open PRs with failing checks. **Engage** drafts fix-it orders to the mission on that branch |
+| `/cmt loot` | Your bags: every merged PR is an item, with quality set by lines changed |
+| `/cmt ach` | Achievements |
+| `/cmt log` | Combat log: your missions' tool calls as spells ("Detect Magic hits \"TODO\" for 812") |
 | `/cmt sound`, `/cmt announce` | Toggle alerts |
+
+Loot and bosses come from `gh api graphql` every 3 minutes, so the companion needs `gh` signed in.
 
 ## Limitations
 

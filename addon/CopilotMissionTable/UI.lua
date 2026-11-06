@@ -98,6 +98,12 @@ local function createRow(parent, i)
 	row.index = font(row, "GameFontDisableSmall", "RIGHT")
 	row.index:SetPoint("TOPRIGHT", -6, -4)
 
+	row.skull = row:CreateTexture(nil, "OVERLAY")
+	row.skull:SetTexture("Interface\\TargetingFrame\\UI-TargetingFrame-Skull")
+	row.skull:SetSize(16, 16)
+	row.skull:SetPoint("BOTTOMRIGHT", row.icon, "BOTTOMRIGHT", 6, -4)
+	row.skull:Hide()
+
 	row:SetScript("OnClick", function(self)
 		selectedId = self.sessionId
 		ns.PlaySound("IG_MAINMENU_OPTION_CHECKBOX_ON")
@@ -139,6 +145,7 @@ local function updateRow(row, s, index)
 		row.bar:SetValue(s.context or 0)
 	end
 	row.glow:SetShown(s.status == "input")
+	row.skull:SetShown(ns.BossForSession and ns.BossForSession(s.id) ~= nil)
 	if s.id == selectedId then
 		row:SetBackdropBorderColor(1, 0.82, 0, 1)
 	else
@@ -424,9 +431,57 @@ function ns.Refresh()
 		selectedId = first and first.id
 	end
 	updateHeader()
-	updateList()
-	updateDetail()
+	local view = ns.currentView
+	if view and view.refresh then
+		view.refresh()
+	else
+		updateList()
+		updateDetail()
+	end
 	ns.UpdateBeacon()
+end
+
+-- Extra panels (raid, loot, achievements) fill the body below the header.
+function ns.AddView(name, build, refresh)
+	local frame = CreateFrame("Frame", nil, main)
+	frame:SetPoint("TOPLEFT", 12, -92)
+	frame:SetPoint("BOTTOMRIGHT", -14, 14)
+	frame:Hide()
+	build(frame)
+	table.insert(ns.views, { name = name, frame = frame, refresh = refresh })
+end
+
+function ns.SelectView(name)
+	for _, view in ipairs(ns.views) do
+		local active = view.name == name
+		view.frame:SetShown(active)
+		if active then ns.currentView = view end
+		if view.tab then
+			if active then view.tab:LockHighlight() else view.tab:UnlockHighlight() end
+			view.tab:SetAlpha(active and 1 or 0.75)
+		end
+	end
+	ns.Refresh()
+end
+
+local function buildTabs()
+	local previous
+	for i = #ns.views, 1, -1 do
+		local view = ns.views[i]
+		local tab = button(main, view.name, 104, function()
+			ns.PlaySound("IG_CHARACTER_INFO_TAB")
+			ns.SelectView(view.name)
+		end)
+		tab:SetHeight(22)
+		if previous then
+			tab:SetPoint("RIGHT", previous, "LEFT", -4, 0)
+		else
+			tab:SetPoint("TOPRIGHT", -16, -66)
+		end
+		view.tab = tab
+		previous = tab
+	end
+	ns.SelectView("Missions")
 end
 
 function ns.Show(sessionId)
@@ -436,7 +491,18 @@ function ns.Show(sessionId)
 		if index then scrollOffset = math.max(0, index - VISIBLE_ROWS) end
 	end
 	main:Show()
-	ns.Refresh()
+	if sessionId or not ns.currentView then
+		ns.SelectView("Missions")
+	else
+		ns.Refresh()
+	end
+end
+
+-- Pre-fills orders for a mission and jumps to it.
+function ns.Draft(sessionId, text)
+	ns.Show(sessionId)
+	detail.box:SetText(text)
+	detail.box:SetFocus()
 end
 
 function ns.Toggle()
@@ -513,7 +579,11 @@ local function buildMain()
 		end
 	end)
 
-	local list = CreateFrame("Frame", nil, main, BACKDROP)
+	local missions = CreateFrame("Frame", nil, main)
+	missions:SetAllPoints(main)
+	ns.views = { { name = "Missions", frame = missions } }
+
+	local list = CreateFrame("Frame", nil, missions, BACKDROP)
 	list:SetPoint("TOPLEFT", 12, -92)
 	list:SetPoint("BOTTOMLEFT", 12, 14)
 	list:SetWidth(LIST_WIDTH)
@@ -529,7 +599,7 @@ local function buildMain()
 	main.listEmpty:SetPoint("CENTER")
 	main.listEmpty:SetText("No missions reported.")
 
-	buildDetail(main)
+	buildDetail(missions)
 
 	-- Tick timers ("on mission for 3m") while open.
 	local acc = 0
@@ -621,7 +691,10 @@ function ns.UpdateBeacon()
 end
 
 function ns.BuildUI()
+	ns.ui = { font = font, button = button, setBackdrop = setBackdrop, tooltip = tooltip, BACKDROP = BACKDROP }
 	buildMain()
 	buildBeacon()
+	if ns.BuildFun then ns.BuildFun() end
+	buildTabs()
 	ns.UpdateBeacon()
 end

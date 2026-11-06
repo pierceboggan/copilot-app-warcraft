@@ -106,11 +106,18 @@ local function addOrder(order)
 	if ns.Refresh then ns.Refresh() end
 end
 
+function ns.Stat(name, amount)
+	ns.db.stats[name] = (ns.db.stats[name] or 0) + (amount or 1)
+end
+
 function ns.QueueMessage(sessionId, text, mode)
 	text = text and strtrim(text) or ""
 	if text == "" then return false end
 	local s = ns.FindSession(sessionId)
 	addOrder({ sessionId = sessionId, kind = "message", text = text, mode = mode or "enqueue" })
+	ns.Stat("couriers")
+	if mode == "immediate" then ns.Stat("priority") end
+	if tonumber(date("%H")) < 5 then ns.Stat("nightOwl") end
 	ns.Print(string.format(
 		"Courier saddled for |cffffd100%s|r. Hearth (/reload) to dispatch.",
 		s and s.name or "mission"
@@ -130,6 +137,8 @@ function ns.Answer(sessionId, requestId, text)
 		end
 	end
 	addOrder({ sessionId = sessionId, kind = "answer", requestId = requestId, text = text })
+	ns.Stat("answers")
+	ns.Stat("couriers")
 	ns.Print("Answer sealed: |cffffffff" .. text .. "|r. Hearth (/reload) to dispatch.")
 	return true
 end
@@ -145,6 +154,7 @@ function ns.CancelOrder(id)
 end
 
 function ns.Sync()
+	ns.Stat("hearths")
 	ReloadUI()
 end
 
@@ -242,6 +252,10 @@ frame:SetScript("OnEvent", function(_, event, arg1)
 		local db = CopilotMissionTableDB
 		db.outbox = db.outbox or {}
 		db.lastStatus = db.lastStatus or {}
+		db.stats = db.stats or {}
+		db.loot = db.loot or {}
+		db.achievements = db.achievements or {}
+		db.kills = db.kills or {}
 		db.settings = db.settings or {}
 		if db.settings.sound == nil then db.settings.sound = true end
 		if db.settings.announce == nil then db.settings.announce = true end
@@ -254,6 +268,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
 		ns.announced = true
 		C_Timer.After(2, function()
 			announce(ns.events or {})
+			if ns.FunOnEnter then ns.FunOnEnter() end
 			if ns.db.settings.openOnQuest and ns.events and #(ns.events.questions or {}) > 0 and ns.Show then
 				ns.Show(ns.events.questions[1].id)
 			end
@@ -269,6 +284,8 @@ local function printHelp()
 	print("  |cffffd100/cmt <n>! <orders>|r  priority orders (delivered at the next turn)")
 	print("  |cffffd100/cmt answer <n> <text or choice #>|r  answer a mission's question")
 	print("  |cffffd100/cmt sync|r  hearth: /reload to dispatch couriers and fetch reports")
+	print("  |cffffd100/cmt raid|r, |cffffd100/cmt loot|r, |cffffd100/cmt ach|r  open a tab")
+	print("  |cffffd100/cmt log|r  toggle the combat log")
 	print("  |cffffd100/cmt sound|r / |cffffd100/cmt announce|r  toggle alerts")
 end
 
@@ -283,6 +300,12 @@ SlashCmdList.COPILOTMISSIONTABLE = function(input)
 		printHelp()
 	elseif lower == "sync" or lower == "hearth" then
 		ns.Sync()
+	elseif lower == "log" then
+		ns.ToggleCombatLog()
+	elseif lower == "raid" or lower == "loot" or lower == "ach" or lower == "achievements" then
+		local names = { raid = "Raid", loot = "Loot", ach = "Achievements", achievements = "Achievements" }
+		ns.Show()
+		ns.SelectView(names[lower])
 	elseif lower == "sound" or lower == "announce" then
 		ns.db.settings[lower] = not ns.db.settings[lower]
 		ns.Print(lower .. " " .. (ns.db.settings[lower] and "on" or "off"))
